@@ -51,9 +51,16 @@ Failures are grouped into three classes:
 
 | Class | Status | Meaning |
 |---|---|---|
-| `HARD` | 5.x.x | Permanent. The mailbox does not exist or refuses mail outright. |
-| `SOFT` | 4.x.x | Transient. Typically a full mailbox or a temporarily unavailable server. |
+| `HARD` | 5.x.x | Permanent. The receiving server will not retry. Typically a nonexistent mailbox, or one it has stopped accepting mail for. |
+| `SOFT` | 4.x.x | Transient. The receiving server was temporarily unable to accept the message, for example greylisting, a rate limit, or a mailbox that is merely full at the moment. |
 | `UNKNOWN` | none parsed | A malformed or non standard bounce. Surfaced rather than discarded. |
+
+Only the leading digit determines the class. The subcode that follows describes
+the condition, not its permanence, so the same subcode appears in both classes.
+A full mailbox is reported as `452-4.2.2` (`OverQuotaTemp`) when the receiving
+server is willing to retry, and as `552-5.2.2` (`OverQuotaPerm`) when it is
+not. Both read as a storage problem; only the first is worth retrying, and the
+script classifies on the leading digit alone.
 
 ---
 
@@ -118,7 +125,7 @@ script requests access to Gmail, Sheets, and the ability to send mail as the
 signed in account.
 
 On completion the execution log prints the URL of a new spreadsheet named
-`Koha bounce reporter`. It contains two tabs, `config` and `bounces`. The
+`Koha Gmail bounce reporter`. It contains two tabs, `config` and `bounces`. The
 spreadsheet ID is stored in the project's script properties under the key
 `CONFIG_SPREADSHEET_ID`, so the script will find it on every later run.
 
