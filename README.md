@@ -1,4 +1,4 @@
-# Koha bounce reporter
+# Koha Gmail bounce reporter
 
 A Google Apps Script that watches the mailbox used to send Koha ILS notices,
 traps the delivery failure reports that Gmail returns, extracts the reason for
