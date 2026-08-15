@@ -1,5 +1,5 @@
 /**
- * Koha bounce reporter for Google Workspace.
+ * Koha Gmail bounce reporter for Google Workspace.
  *
  * Copyright (C) 2026 L2C2 Technologies
  * Author: Indranil Das Gupta <indradg@l2c2.co.in>
@@ -238,7 +238,7 @@ function bootstrapConfigSheet() {
   if (stored) {
     ss = SpreadsheetApp.openById(stored);
   } else {
-    ss = SpreadsheetApp.create('Koha bounce reporter');
+    ss = SpreadsheetApp.create('Koha Gmail bounce reporter');
     PropertiesService.getScriptProperties()
       .setProperty(BOOTSTRAP.PROPERTY_KEY, ss.getId());
     var first = ss.getSheets()[0];
@@ -514,7 +514,7 @@ function sendDigest_(cfg, records) {
   html += '<p style="color:#666">Reported threads are labelled "' +
           cfg.processed_label + '" and will not be sent again.</p></div>';
 
-  var options = { htmlBody: html, name: 'Koha bounce reporter' };
+  var options = { htmlBody: html, name: 'Koha Gmail bounce reporter' };
   if (cfg.notify_cc.length) options.cc = cfg.notify_cc.join(',');
   if (cfg.attach_csv) {
     options.attachments = [Utilities.newBlob(
