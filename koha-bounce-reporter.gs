@@ -89,6 +89,28 @@ var SETTINGS = [
    'Timezone for timestamps in the digest and CSV.']
 ];
 
+/**
+ * The register schema, declared once. The header row, the order of appended
+ * values, and the CSV all derive from this list, so they cannot drift apart.
+ *
+ * Changing this list is a schema change. Existing register tabs keep their
+ * old header, because ensureRegisterSheet_ only writes one when creating the
+ * tab, so an existing sheet must be migrated to match. verifyRegisterSchema_
+ * refuses to write into a mismatched sheet rather than misaligning the data.
+ */
+var REGISTER_COLUMNS = [
+  'bounce_date',
+  'class',
+  'status',
+  'recipient',
+  'action',
+  'diagnostic',
+  'original_subject',
+  'gmail_message_id'
+];
+
+var REGISTER_KEY_COLUMN = 'gmail_message_id';
+
 /* ------------------------------------------------------------------ */
 /* Scheduling                                                          */
 /* ------------------------------------------------------------------ */
@@ -290,13 +312,95 @@ function ensureRegisterSheet_(ss, name) {
   var sheet = ss.getSheetByName(name);
   if (!sheet) {
     sheet = ss.insertSheet(name);
-    sheet.appendRow(['bounce_date', 'class', 'status', 'recipient', 'action',
-                     'diagnostic', 'remote_mta', 'original_subject',
-                     'gmail_message_id']);
+    sheet.appendRow(REGISTER_COLUMNS);
     sheet.setFrozenRows(1);
-    sheet.getRange(1, 1, 1, 9).setFontWeight('bold');
+    sheet.getRange(1, 1, 1, REGISTER_COLUMNS.length).setFontWeight('bold');
   }
   return sheet;
+}
+
+/**
+ * Reads the header row of an existing register and returns a map of column
+ * name to 1-based index.
+ */
+function registerHeaderMap_(sheet) {
+  var width = Math.max(sheet.getLastColumn(), 1);
+  var header = sheet.getRange(1, 1, 1, width).getValues()[0];
+  var map = {};
+  header.forEach(function (name, i) {
+    var key = String(name || '').trim().toLowerCase();
+    if (key) map[key] = i + 1;
+  });
+  return map;
+}
+
+/**
+ * Refuses to append to a register whose header does not match the current
+ * schema. Writing positionally into a mismatched sheet would misalign every
+ * column and, worse, would break de-duplication silently.
+ */
+function verifyRegisterSchema_(sheet) {
+  if (sheet.getLastRow() === 0) return;
+
+  var header = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1))
+                    .getValues()[0]
+                    .map(function (v) { return String(v || '').trim().toLowerCase(); })
+                    .filter(function (v) { return v !== ''; });
+
+  var matches = header.length === REGISTER_COLUMNS.length &&
+                REGISTER_COLUMNS.every(function (name, i) {
+                  return header[i] === name;
+                });
+
+  if (!matches) {
+    throw new Error(
+      'Register tab "' + sheet.getName() + '" does not match the current ' +
+      'schema. Expected: ' + REGISTER_COLUMNS.join(', ') + '. Found: ' +
+      header.join(', ') + '. Run migrateRegister() to bring it into line, ' +
+      'or point register_sheet_name at a new tab.');
+  }
+}
+
+/**
+ * Brings an existing register tab into line with REGISTER_COLUMNS by deleting
+ * columns the schema no longer declares. Run manually, once, after a schema
+ * change. Safe to re-run: it exits quietly when the header already matches.
+ *
+ * Columns are only ever deleted, never reordered or inserted, so anything
+ * beyond that needs doing by hand.
+ */
+function migrateRegister() {
+  var cfg = loadConfig_();
+  var sheet = cfg._spreadsheet.getSheetByName(cfg.register_sheet_name);
+
+  if (!sheet) {
+    Logger.log('No register tab named "' + cfg.register_sheet_name + '". ' +
+               'Nothing to migrate.');
+    return;
+  }
+
+  var map = registerHeaderMap_(sheet);
+  var obsolete = Object.keys(map).filter(function (name) {
+    return REGISTER_COLUMNS.indexOf(name) === -1;
+  });
+
+  if (!obsolete.length) {
+    Logger.log('Register already matches the current schema. No change made.');
+    verifyRegisterSchema_(sheet);
+    return;
+  }
+
+  // Delete right to left so earlier indices stay valid.
+  obsolete
+    .map(function (name) { return { name: name, index: map[name] }; })
+    .sort(function (a, b) { return b.index - a.index; })
+    .forEach(function (col) {
+      sheet.deleteColumn(col.index);
+      Logger.log('Deleted column ' + col.index + ' (' + col.name + ').');
+    });
+
+  verifyRegisterSchema_(sheet);
+  Logger.log('Register migrated. Header is now: ' + REGISTER_COLUMNS.join(', '));
 }
 
 /* ------------------------------------------------------------------ */
@@ -433,7 +537,6 @@ function parseDsn_(msg, originalSubject) {
       'class': classify_(status, diagnostic),
       action: action,
       diagnostic: diagnostic,
-      remoteMta: field_(chunk, 'Remote-MTA'),
       originalSubject: originalSubject || '',
       messageId: msg.getId(),
       permalink: 'https://mail.google.com/mail/u/0/#all/' + msg.getId()
@@ -451,7 +554,6 @@ function parseDsn_(msg, originalSubject) {
         'class': 'UNKNOWN',
         action: '',
         diagnostic: collapse_(msg.getPlainBody().substring(0, 300)),
-        remoteMta: '',
         originalSubject: originalSubject || '',
         messageId: msg.getId(),
         permalink: 'https://mail.google.com/mail/u/0/#all/' + msg.getId()
@@ -558,17 +660,28 @@ function sendEmptyDigest_(cfg) {
 }
 
 function toCsv_(cfg, records) {
-  var lines = [['bounce_date', 'class', 'status', 'recipient', 'action',
-                'diagnostic', 'remote_mta', 'original_subject',
-                'gmail_message_id'].join(',')];
+  var lines = [REGISTER_COLUMNS.join(',')];
   records.forEach(function (r) {
-    lines.push([
-      Utilities.formatDate(r.when, cfg.timezone, 'yyyy-MM-dd HH:mm:ss'),
-      r['class'], r.status, r.recipient, r.action,
-      r.diagnostic, r.remoteMta, r.originalSubject, r.messageId
-    ].map(csvCell_).join(','));
+    lines.push(registerRow_(cfg, r).map(csvCell_).join(','));
   });
   return lines.join('\n');
+}
+
+/**
+ * Builds one row in REGISTER_COLUMNS order. Used by both the register and
+ * the CSV, so the two can never disagree.
+ */
+function registerRow_(cfg, r) {
+  return [
+    Utilities.formatDate(r.when, cfg.timezone, 'yyyy-MM-dd HH:mm:ss'),
+    r['class'],
+    r.status,
+    r.recipient,
+    r.action,
+    r.diagnostic,
+    r.originalSubject,
+    r.messageId
+  ];
 }
 
 function csvCell_(v) {
@@ -582,13 +695,9 @@ function csvCell_(v) {
 
 function appendToRegister_(cfg, records) {
   var sheet = ensureRegisterSheet_(cfg._spreadsheet, cfg.register_sheet_name);
-  var rows = records.map(function (r) {
-    return [
-      Utilities.formatDate(r.when, cfg.timezone, 'yyyy-MM-dd HH:mm:ss'),
-      r['class'], r.status, r.recipient, r.action,
-      r.diagnostic, r.remoteMta, r.originalSubject, r.messageId
-    ];
-  });
+  verifyRegisterSchema_(sheet);
+
+  var rows = records.map(function (r) { return registerRow_(cfg, r); });
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length)
        .setValues(rows);
 }
@@ -608,8 +717,17 @@ function loadSeenIds_(cfg) {
   var last = sheet.getLastRow();
   if (last < 2) return seen;
 
+  // Located by header name, not by position, so a schema change cannot
+  // silently point this at the wrong column.
+  var column = registerHeaderMap_(sheet)[REGISTER_KEY_COLUMN];
+  if (!column) {
+    throw new Error('Register tab "' + sheet.getName() + '" has no "' +
+                    REGISTER_KEY_COLUMN + '" column. De-duplication cannot ' +
+                    'run. Check the header row.');
+  }
+
   var start = Math.max(2, last - 4999);
-  sheet.getRange(start, 9, last - start + 1, 1).getValues()
+  sheet.getRange(start, column, last - start + 1, 1).getValues()
     .forEach(function (row) { if (row[0]) seen[row[0]] = true; });
   return seen;
 }
